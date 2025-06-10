@@ -9,8 +9,7 @@
 char auth[] = "lobYh1dF_GldbL1c8f6fBZufJU6Ge2zV";
 
 // k1:傾き　k2:倒れる速度　k3:位置　k4:移動速度
-volatile float k1 = 300, k2 = 25, k3 = 35, k4 = 20; 
-//volatile float k1 = 300, k2 = 25, k3 = 0, k4 = 15; //位置制御なしでも速度制御で静止する
+volatile float k1 = 300, k2 = 25, k3 = 35, k4 = 10; //マイクロステップなし
 
 #define DIR_L   32
 #define STEP_L  25
@@ -29,26 +28,6 @@ volatile float k1 = 300, k2 = 25, k3 = 35, k4 = 20;
 #define STEPS 120            // 1回転のSTEPS
 #define MICRO_STEP 1         // ステッピングモータのマイクロステップの逆数 (1/4 -> 4)
 
-// 加速度・ジャイロセンサーの制御定数
-#define MPU6050_ADDR         0x68 // MPU-6050 device address
-#define MPU6050_SMPLRT_DIV   0x19 // MPU-6050 register address
-#define MPU6050_CONFIG       0x1a
-#define MPU6050_GYRO_CONFIG  0x1b
-#define MPU6050_ACCEL_CONFIG 0x1c
-#define MPU6050_ACCEL_XOUT_H 0x3b
-#define MPU6050_ACCEL_XOUT_L 0x3c
-#define MPU6050_ACCEL_YOUT_H 0x3d
-#define MPU6050_ACCEL_YOUT_L 0x3e
-#define MPU6050_ACCEL_ZOUT_H 0x3f
-#define MPU6050_ACCEL_ZOUT_L 0x40
-#define MPU6050_GYRO_XOUT_H  0x43
-#define MPU6050_GYRO_XOUT_L  0x44
-#define MPU6050_GYRO_YOUT_H  0x45
-#define MPU6050_GYRO_YOUT_L  0x46
-#define MPU6050_GYRO_ZOUT_H  0x47
-#define MPU6050_GYRO_ZOUT_L  0x48
-#define MPU6050_PWR_MGMT_1   0x6b
-#define MPU6050_WHO_AM_I     0x75
 
 // timer1はパルス生成用、timer2は制御ループ用
 hw_timer_t * timer1 = NULL;
@@ -59,46 +38,46 @@ portMUX_TYPE timerMux1 = portMUX_INITIALIZER_UNLOCKED;
 portMUX_TYPE timerMux2 = portMUX_INITIALIZER_UNLOCKED;
 
 volatile bool outL = false, outR = false;
-volatile int16_t countL, countR;
-volatile int16_t controlSpeed;
-volatile int16_t moveSpeed, turnSpeed;
-volatile int16_t motorL, motorR;
-volatile int16_t rawAccX, rawAccZ;
+volatile int countL, countR;
+volatile int controlSpeed;
+volatile int moveSpeed, targetSpeed, turnSpeed;
+volatile int motorL, motorR;
+
 volatile int16_t rawGyroY;
 volatile int16_t temperature;
 
 volatile int32_t lastUptime, startTime, currentTime;
-volatile int32_t nextBlynkRunTime;
 
 volatile float dt;
-volatile float caribAccAngleY;
 volatile float caribGyroY;
-volatile float accX, accZ;
-volatile float accAngleY;
 volatile float gyroY;
+volatile float errorY, intY, prevErrorY, divY;
+volatile float targetY, adjustY;
+volatile float lpfY, lpfA = 0.999;
 volatile float dpsY, degY, pos;
-volatile float batteryMonitor;
+volatile float tiltY;
+volatile float maxTilt = 3;
 
-int16_t headStand = 0;
+int headStand = 0;
 
 void startStand() {
   degY = 0;
+  lpfY = 0;
   pos = 0;
   controlSpeed = 0;
   motorL = 0; motorR = 0;
   countL = 0; countR = 0;
   moveSpeed = 0;
+  targetSpeed = 0;
   turnSpeed = 0;
-
-  nextBlynkRunTime = micros() + 100000; //100ms
+  tiltY = 0;
 
   // 制御パラメータをスマホのBlynkアプリに送信
   Blynk.virtualWrite(V0, k1);
   Blynk.virtualWrite(V1, k2);
   Blynk.virtualWrite(V2, k3);
   Blynk.virtualWrite(V3, k4);
-  Blynk.virtualWrite(V4, 0);
-  Blynk.virtualWrite(V5, 0);
+  Blynk.virtualWrite(V7, maxTilt);
 
   //ステッピングモータを有効化し倒立制御開始
   digitalWrite(EN, LOW);
@@ -143,6 +122,27 @@ void IRAM_ATTR onTimer1() {
 void IRAM_ATTR onTimer2() {
   xSemaphoreGiveFromISR(timerSemaphore2, NULL);
 }
+
+// 加速度・ジャイロセンサーの制御定数
+#define MPU6050_ADDR         0x68 // MPU-6050 device address
+#define MPU6050_SMPLRT_DIV   0x19 // MPU-6050 register address
+#define MPU6050_CONFIG       0x1a
+#define MPU6050_GYRO_CONFIG  0x1b
+#define MPU6050_ACCEL_CONFIG 0x1c
+#define MPU6050_ACCEL_XOUT_H 0x3b
+#define MPU6050_ACCEL_XOUT_L 0x3c
+#define MPU6050_ACCEL_YOUT_H 0x3d
+#define MPU6050_ACCEL_YOUT_L 0x3e
+#define MPU6050_ACCEL_ZOUT_H 0x3f
+#define MPU6050_ACCEL_ZOUT_L 0x40
+#define MPU6050_GYRO_XOUT_H  0x43
+#define MPU6050_GYRO_XOUT_L  0x44
+#define MPU6050_GYRO_YOUT_H  0x45
+#define MPU6050_GYRO_YOUT_L  0x46
+#define MPU6050_GYRO_ZOUT_H  0x47
+#define MPU6050_GYRO_ZOUT_L  0x48
+#define MPU6050_PWR_MGMT_1   0x6b
+#define MPU6050_WHO_AM_I     0x75
 
 // センサーへのコマンド送信
 void writeMPU6050(byte reg, byte data) {
@@ -189,11 +189,9 @@ void setup() {
   analogSetAttenuation(ADC_11db);
 
   if (analogReadMilliVolts(BATTERY_MONITOR) < 800) {
-    while (true) {
-      Serial.print("LOW BATTERY.");
-      Serial.println(analogReadMilliVolts(BATTERY_MONITOR));
-      vTaskDelay(1000 / portTICK_PERIOD_MS);
-    }
+    Serial.print("LOW BATTERY.");
+    Serial.println(analogReadMilliVolts(BATTERY_MONITOR));
+    while (true) ;
   }
 
   // センサーの初期化
@@ -201,10 +199,8 @@ void setup() {
   Wire.begin(SDA, SCL);
 
   if (readMPU6050(MPU6050_WHO_AM_I) != 0x68) {
-    while (true) {
-      Serial.println("WHO_AM_I error.");
-      vTaskDelay(1000 / portTICK_PERIOD_MS);
-    }
+    Serial.println("WHO_AM_I error.");
+    while (true) ;
   }
   else {
     Serial.println("WHO_AM_I OK.");
@@ -219,20 +215,11 @@ void setup() {
   delay(2000);
 
   //ジャイロのゼロ点調整のために静止時の出力を1000回計測して平均を算出
-  caribAccAngleY = 0;
   caribGyroY = 0;
   for (int i = 0; i < 1000  ; i++)  {
-    rawAccX = (readMPU6050(MPU6050_ACCEL_XOUT_H) << 8) | readMPU6050(MPU6050_ACCEL_XOUT_L);
-    rawAccZ = (readMPU6050(MPU6050_ACCEL_ZOUT_H) << 8) | readMPU6050(MPU6050_ACCEL_ZOUT_L);
     rawGyroY = (readMPU6050(MPU6050_GYRO_YOUT_H) << 8) | readMPU6050(MPU6050_GYRO_YOUT_L);
-
-    accX = (float)rawAccX / 16384.0;
-    accZ = (float)rawAccZ / 16384.0;
-    accAngleY = atan2(accX, accZ) * 360 / -2.0 / PI;
-    caribAccAngleY += accAngleY;
     caribGyroY += (float)rawGyroY;
   }
-  caribAccAngleY /= 1000;
   caribGyroY /= 1000;
   Serial.print("Carib OK. caribGyroY:");
   Serial.println(caribGyroY);
@@ -256,56 +243,60 @@ void setup() {
 
 
 void loop() {
-  currentTime = micros();
+  // バッテリ電圧の監視 1/4に分圧しているので3.2Vが閾値となる
+  if (analogReadMilliVolts(BATTERY_MONITOR) < 800) {
+    Serial.print("LOW BATTERY.");
+    Serial.println(analogReadMilliVolts(BATTERY_MONITOR));
+    while (true) ;
+  }
+
   if (headStand == 1) {
     //if (xSemaphoreTake(timerSemaphore1, 0) == pdTRUE) {
     //}
 
     if (xSemaphoreTake(timerSemaphore2, 0) == pdTRUE) {
       // dt計測
+      currentTime = micros();
       dt = (currentTime - lastUptime) * 0.000001;
       lastUptime = currentTime;
 
-      // 加速度、角速度を取得
-      //rawAccX = (readMPU6050(MPU6050_ACCEL_XOUT_H) << 8) | readMPU6050(MPU6050_ACCEL_XOUT_L);
-      //rawAccZ = (readMPU6050(MPU6050_ACCEL_ZOUT_H) << 8) | readMPU6050(MPU6050_ACCEL_ZOUT_L);
-      //rawGyroY = (readMPU6050(MPU6050_GYRO_YOUT_H) << 8) | readMPU6050(MPU6050_GYRO_YOUT_L);
-
-      Wire.beginTransmission(MPU6050_ADDR);
-      Wire.write(MPU6050_ACCEL_XOUT_H);
-      Wire.endTransmission(false);
-      Wire.requestFrom(MPU6050_ADDR, 14, true);
-      while (Wire.available() < 14);
-
-      int16_t dummy;
-
-      rawAccX = Wire.read() << 8 | Wire.read();
-      dummy = Wire.read() << 8 | Wire.read();
-      rawAccZ = Wire.read() << 8 | Wire.read();
-      dummy = Wire.read() << 8 | Wire.read();
-      dummy = Wire.read() << 8 | Wire.read();
-      rawGyroY = Wire.read() << 8 | Wire.read();
-      dummy = Wire.read() << 8 | Wire.read();
-
-      accX = (float)rawAccX / 16384.0;
-      accZ = (float)rawAccZ / 16384.0;
-      accAngleY = atan2(accX, accZ) * 360 / -2.0 / PI - caribAccAngleY;
-
+      // 角速度を取得
+      rawGyroY = (readMPU6050(MPU6050_GYRO_YOUT_H) << 8) | readMPU6050(MPU6050_GYRO_YOUT_L);
       gyroY = (float)rawGyroY - caribGyroY;
       dpsY =  gyroY / 131.0;
 
-      // 相補フィルターで角度を求める
-      degY = 0.999 * (degY + dpsY * dt) + 0.001 * accAngleY;
+      // 角速度を積算して角度を求める
+      degY +=  dpsY * dt;
 
-      // 位置制御
-      pos += controlSpeed * dt;
+      //ローパスフィルタでドリフトを補正
+      lpfY *=  lpfA;
+      lpfY +=  (1 - lpfA) * degY;
 
-      // 操作量の計算
-      controlSpeed += (k1 * degY + k2 * dpsY + k3 * pos + k4 * controlSpeed) * dt;
+      if (moveSpeed != 0 || turnSpeed != 0) {
+        //移動中や転回中は位置制御を停止
+        pos = 0;
+      }
+      else {
+        // 停止中は位置制御を行う
+        pos += controlSpeed * dt;
+      }
 
-      // 倒立制御 + 転回 (移動は位置制御でやっているのでこの式には出てこない)
-      motorL = controlSpeed + turnSpeed;
-      motorR = controlSpeed - turnSpeed;
+      // 制御量の計算
+      controlSpeed += (k1 * (degY - lpfY - tiltY) + k2 * dpsY + k3 * pos + k4 * controlSpeed) * dt;
+
+      // 緩やかに加減速し、加減速方向に少しずつ倒す
+      if ( moveSpeed < targetSpeed) {
+        moveSpeed += 1;
+        if (tiltY < maxTilt) tiltY += 0.05;
+      }
+      else if ( moveSpeed > targetSpeed) {
+        moveSpeed -= 1;
+        if (tiltY > 0 - maxTilt) tiltY -= 0.05;
+      }
+
+      // 倒立制御 + 移動 + 転回
+      motorL = controlSpeed + moveSpeed + turnSpeed;
+      motorR = controlSpeed + moveSpeed - turnSpeed;
 
       motorL = constrain(motorL, 0 - LIMIT * MICRO_STEP, LIMIT * MICRO_STEP);
       motorR = constrain(motorR, 0 - LIMIT * MICRO_STEP, LIMIT * MICRO_STEP);
@@ -316,7 +307,7 @@ void loop() {
     }
 
     // 倒れたらモーター停止
-    if (45 < abs(degY)) {
+    if (45 < abs(degY - lpfY)) {
       headStand = 0;
       Serial.println("*********************STOP***********************");
       Serial.println((lastUptime - startTime) / 1000000);
@@ -327,27 +318,7 @@ void loop() {
     motorR = 0;
     digitalWrite(EN, HIGH);
   }
-
-  //100msに1回だけ実行
-  if (currentTime > nextBlynkRunTime) {
-    // Blynkアプリから値取得
-    Blynk.run();
-    nextBlynkRunTime = micros() + 100000;
-
-    // posにmoveSpeedを加算し、位置制御で前進・後退させる
-    pos += moveSpeed;
-
-    // バッテリ電圧の監視 1/4に分圧しているので3.0Vが閾値となる
-    batteryMonitor = analogReadMilliVolts(BATTERY_MONITOR);
-    if ( batteryMonitor < 750) {
-      Serial.printf("LOW BATTERY. %d mV\n", batteryMonitor * 4);
-      headStand = 0;
-      while (true) {
-        Serial.printf("LOW BATTERY. Min:%f mV, Now:%f mV\n", batteryMonitor * 4, analogReadMilliVolts(BATTERY_MONITOR) * 4);
-        vTaskDelay(1000 / portTICK_RATE_MS);
-      }
-    }
-  }
+  Blynk.run();
 }
 
 
@@ -367,16 +338,20 @@ BLYNK_WRITE(V3) {
   k4 = (float) param[0].asInt();
 }
 BLYNK_WRITE(V4) {
-  // 転回スピード -30～30
+  // Blynkアプリ側の値の範囲は-60～60
   turnSpeed = param[0].asInt();
 }
 
 BLYNK_WRITE(V5) {
-  // 前進・後退スピード -25～25
-  moveSpeed = param[0].asInt();
+  // Blynkアプリ側の値の範囲は-300～300
+  targetSpeed = param[0].asInt();
 }
 
 BLYNK_WRITE(V6) {
   vTaskDelay(1000 / portTICK_RATE_MS);
   startStand();
+}
+
+BLYNK_WRITE(V7) {
+  maxTilt = param[0].asInt();
 }
